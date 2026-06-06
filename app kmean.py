@@ -5,14 +5,23 @@ import plotly.express as px
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.cluster import KMeans
 
+# Настройка страницы
 st.set_page_config(page_title="Sustainable Supply Chain Matrix", layout="wide")
 
-RISK_COLS = ['Performance_Quality_Risk_Score', 'Financial_Risk_Score', 'Nachhaltigkeit_Risk_score', 'Standards Risks_Score', 'Political_Risk_Score']
+# Константы рисков
+RISK_COLS = [
+    'Performance_Quality_Risk_Score', 
+    'Financial_Risk_Score', 
+    'Nachhaltigkeit_Risk_score', 
+    'Standards Risks_Score', 
+    'Political_Risk_Score'
+]
 
 @st.cache_data
 def load_data():
+    # Загрузка данных
     df = pd.read_csv('Merged dataset with Scores.csv', sep=';', decimal=',')
-    df['Order Value USD'] = df['Order Value USD'].astype(str).str.replace(' ', '').str.replace(',', '.').astype(float)
+    df['Order Value USD'] = df['Order Value USD'].astype(str).str.replace(' ', '', regex=False).str.replace(',', '.', regex=False).astype(float)
     return df
 
 def get_prepared_data(df, category, timeframe, weights):
@@ -24,7 +33,7 @@ def get_prepared_data(df, category, timeframe, weights):
         {'Order Value USD': 'sum', 'Country': 'first', **{col: 'mean' for col in RISK_COLS}}
     ).reset_index()
     
-    # Используем глобальный скейлер (можно сохранить параметры скейлера для консистентности)
+    # Нормализация относительно годовых данных (используем min/max из всего исходного df)
     agg['Norm_Spend'] = (agg['Order Value USD'] - df['Order Value USD'].min()) / (df['Order Value USD'].max() - df['Order Value USD'].min())
     agg['Weighted_Risk'] = (agg[RISK_COLS].values * weights).sum(axis=1)
     return agg
@@ -32,17 +41,16 @@ def get_prepared_data(df, category, timeframe, weights):
 def main():
     df = load_data()
     
-    # 1. Обучение модели на годовых данных (один раз)
+    # 1. Обучение модели на годовых данных (выполняется один раз)
     if 'kmeans_model' not in st.session_state:
         full_agg = df.groupby('Supplier_ID').agg({**{col: 'mean' for col in RISK_COLS}, 'Order Value USD': 'sum'})
         scaler = MinMaxScaler()
         X_full = pd.DataFrame({
             'Norm_Spend': scaler.fit_transform(full_agg[['Order Value USD']]).flatten(),
-            'Weighted_Risk': (full_agg[RISK_COLS].values * 0.2).sum(axis=1) # средние веса
+            'Weighted_Risk': (full_agg[RISK_COLS].values * 0.2).sum(axis=1) 
         })
-        model = KMeans(n_clusters=4, random_state=42).fit(X_full)
+        model = KMeans(n_clusters=4, random_state=42, n_init=10).fit(X_full)
         st.session_state.kmeans_model = model
-        st.session_state.scaler = scaler
 
     # --- SIDEBAR ---
     st.sidebar.header("Configuration")
@@ -51,10 +59,10 @@ def main():
     
     weights = np.array([st.sidebar.number_input(col.replace('_Score', ''), 0, 100, 20) for col in RISK_COLS]) / 100
 
-    # --- DATA ---
+    # --- DATA PROCESSING ---
     agg_df = get_prepared_data(df, selected_cat, selected_timeframe, weights)
     
-    # Применение границ (предсказание кластера)
+    # Применение обученных границ
     X_current = agg_df[['Norm_Spend', 'Weighted_Risk']]
     agg_df['Kraljic_Segment'] = st.session_state.kmeans_model.predict(X_current)
 
@@ -65,17 +73,25 @@ def main():
         title="Sustainable Supply Chain: Category-Specific Kraljic Matrix"
     )
     
-    # Интерактивность (выбор точки)
-    st.plotly_chart(fig, width='stretch')
+    # Интерактивность
+    event = st.plotly_chart(fig, width='stretch', on_select="rerun")
 
     # --- DETAILS ---
-    if event and event["selection"]["points"]:
+    if event and "selection" in event and event["selection"]["points"]:
         supplier_id = event["selection"]["points"][0]["customdata"][0]
-        st.subheader(f"Supplier: {supplier_id}")
+        
+        st.divider()
+        st.subheader(f"Supplier Details: {supplier_id}")
+        
         data = agg_df[agg_df['Supplier_ID'] == supplier_id].iloc[0]
-        st.write(f"Country: {data['Country']}")
+        st.write(f"**Country:** {data['Country']}")
+        st.write("**Risk Breakdown:**")
+        
         for col in RISK_COLS:
-            st.progress(float(data[col]), text=f"{col.replace('_Score', '')}: {data[col]:.2f}")
+            risk_val = float(data[col])
+            st.progress(risk_val, text=f"{col.replace('_Score', '')}: {risk_val:.2f}")
+    else:
+        st.info("Select a point on the chart to view supplier details.")
 
 if __name__ == "__main__":
     main()
