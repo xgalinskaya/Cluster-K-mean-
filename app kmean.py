@@ -66,7 +66,7 @@ def main():
     )
     
     # Интерактивность (выбор точки)
-    event = st.plotly_chart(fig, on_select="rerun", use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
 
     # --- DETAILS ---
     if event and event["selection"]["points"]:
