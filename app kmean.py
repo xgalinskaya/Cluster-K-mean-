@@ -3,85 +3,79 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.cluster import KMeans # Импортируем KMeans
+from sklearn.cluster import KMeans
 
-st.set_page_config(page_title="Kraljic Matrix with K-Means", layout="wide")
+st.set_page_config(page_title="Sustainable Supply Chain Matrix", layout="wide")
 
-RISK_COLS = [
-    'Performance_Quality_Risk_Score', 
-    'Financial_Risk_Score', 
-    'Nachhaltigkeit_Risk_score', 
-    'Standards Risks_Score', 
-    'Political_Risk_Score'
-]
+RISK_COLS = ['Performance_Quality_Risk_Score', 'Financial_Risk_Score', 'Nachhaltigkeit_Risk_score', 'Standards Risks_Score', 'Political_Risk_Score']
 
 @st.cache_data
 def load_data():
     df = pd.read_csv('Merged dataset with Scores.csv', sep=';', decimal=',')
-    df['Order Value USD'] = (
-        df['Order Value USD'].astype(str).str.replace(' ', '', regex=False)
-        .str.replace(',', '.', regex=False).astype(float)
-    )
+    df['Order Value USD'] = df['Order Value USD'].astype(str).str.replace(' ', '').str.replace(',', '.').astype(float)
     return df
 
+def get_prepared_data(df, category, timeframe, weights):
+    subset = df[df['Product_Category'] == category].copy()
+    if timeframe != "All Months":
+        subset = subset[subset['Month'].astype(str) == timeframe]
+    
+    agg = subset.groupby('Supplier_ID').agg(
+        {'Order Value USD': 'sum', 'Country': 'first', **{col: 'mean' for col in RISK_COLS}}
+    ).reset_index()
+    
+    # Используем глобальный скейлер (можно сохранить параметры скейлера для консистентности)
+    agg['Norm_Spend'] = (agg['Order Value USD'] - df['Order Value USD'].min()) / (df['Order Value USD'].max() - df['Order Value USD'].min())
+    agg['Weighted_Risk'] = (agg[RISK_COLS].values * weights).sum(axis=1)
+    return agg
+
 def main():
-    st.title("Sustainable Supply Chain: K-Means Kraljic Matrix")
     df = load_data()
+    
+    # 1. Обучение модели на годовых данных (один раз)
+    if 'kmeans_model' not in st.session_state:
+        full_agg = df.groupby('Supplier_ID').agg({**{col: 'mean' for col in RISK_COLS}, 'Order Value USD': 'sum'})
+        scaler = MinMaxScaler()
+        X_full = pd.DataFrame({
+            'Norm_Spend': scaler.fit_transform(full_agg[['Order Value USD']]).flatten(),
+            'Weighted_Risk': (full_agg[RISK_COLS].values * 0.2).sum(axis=1) # средние веса
+        })
+        model = KMeans(n_clusters=4, random_state=42).fit(X_full)
+        st.session_state.kmeans_model = model
+        st.session_state.scaler = scaler
 
     # --- SIDEBAR ---
     st.sidebar.header("Configuration")
-    selected_cat = st.sidebar.selectbox("Select Product Category", sorted(df['Product_Category'].unique()))
-    selected_timeframe = st.sidebar.selectbox("Select Timeframe", ["All Months"] + sorted(df['Month'].unique().astype(str).tolist()))
-
-    # --- RISK WEIGHTS ---
-    st.sidebar.header("Risk Weights")
-    weights = [st.sidebar.number_input(col.replace('_Score', ''), 0, 100, 20, step=5) for col in RISK_COLS]
-    if sum(weights) != 100:
-        st.sidebar.error(f"Sum must be 100! Current: {sum(weights)}")
-        st.stop()
-    weights = np.array(weights) / 100
-
-    # --- DATA PIPELINE ---
-    subset = df[df['Product_Category'] == selected_cat].copy()
-    if selected_timeframe != "All Months":
-        subset = subset[subset['Month'].astype(str) == selected_timeframe]
+    selected_cat = st.sidebar.selectbox("Category", sorted(df['Product_Category'].unique()))
+    selected_timeframe = st.sidebar.selectbox("Timeframe", ["All Months"] + sorted(df['Month'].unique().astype(str).tolist()))
     
-    agg_df = subset.groupby('Supplier_ID').agg(
-        {'Order Value USD': 'sum', 'Country': 'first', **{col: 'mean' for col in RISK_COLS}}
-    ).reset_index()
+    weights = np.array([st.sidebar.number_input(col.replace('_Score', ''), 0, 100, 20) for col in RISK_COLS]) / 100
 
-    # Нормализация для K-Means
-    scaler = MinMaxScaler()
-    agg_df['Norm_Spend'] = scaler.fit_transform(agg_df[['Order Value USD']])
-    agg_df['Weighted_Risk'] = (agg_df[RISK_COLS].values * weights).sum(axis=1)
-
-    # --- K-MEANS CLUSTERING ---
-    # Обучаем модель на 4 кластера
-    X = agg_df[['Norm_Spend', 'Weighted_Risk']]
-    kmeans = KMeans(n_clusters=4, random_state=42, n_init=10)
-    agg_df['Cluster'] = kmeans.fit_predict(X)
+    # --- DATA ---
+    agg_df = get_prepared_data(df, selected_cat, selected_timeframe, weights)
     
-    # Чтобы названия кластеров соответствовали Kraljic, можно отсортировать их по центроидам
-    # Либо просто использовать номера кластеров
-    agg_df['Kraljic_Segment'] = agg_df['Cluster'].astype(str)
+    # Применение границ (предсказание кластера)
+    X_current = agg_df[['Norm_Spend', 'Weighted_Risk']]
+    agg_df['Kraljic_Segment'] = st.session_state.kmeans_model.predict(X_current)
 
     # --- VISUALIZATION ---
     fig = px.scatter(
         agg_df, x="Norm_Spend", y="Weighted_Risk", color="Kraljic_Segment",
-        hover_data=['Supplier_ID'], title="Kraljic Segmentation via K-Means"
+        hover_data=['Supplier_ID'], custom_data=['Supplier_ID'],
+        title="Sustainable Supply Chain: Category-Specific Kraljic Matrix"
     )
     
-    # Добавляем центроиды на график
-    centroids = kmeans.cluster_centers_
-    fig.add_scatter(x=centroids[:, 0], y=centroids[:, 1], mode='markers', 
-                    marker=dict(size=15, symbol='x', color='black'), name='Centroids')
+    # Интерактивность (выбор точки)
+    event = st.plotly_chart(fig, on_select="rerun", use_container_width=True)
 
-    fig.update_layout(height=600)
-    st.plotly_chart(fig, use_container_width=True)
-
-    # Таблица данных
-    st.subheader("Supplier Data")
-    st.dataframe(agg_df[['Supplier_ID', 'Order Value USD', 'Weighted_Risk', 'Kraljic_Segment']])
+    # --- DETAILS ---
+    if event and event["selection"]["points"]:
+        supplier_id = event["selection"]["points"][0]["customdata"][0]
+        st.subheader(f"Supplier: {supplier_id}")
+        data = agg_df[agg_df['Supplier_ID'] == supplier_id].iloc[0]
+        st.write(f"Country: {data['Country']}")
+        for col in RISK_COLS:
+            st.progress(float(data[col]), text=f"{col.replace('_Score', '')}: {data[col]:.2f}")
 
 if __name__ == "__main__":
     main()
